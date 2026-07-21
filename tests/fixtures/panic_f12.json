@@ -1,0 +1,12 @@
+{
+  "type": "secretflashermanaka.vibrator",
+  "channel": "A",
+  "intensity": 0,
+  "armed": true,
+  "panic": true,
+  "vibratorOn": false,
+  "configuredMode": "Off",
+  "effectiveMode": "Off",
+  "rawStrength": 0,
+  "reason": "panic"
+}
