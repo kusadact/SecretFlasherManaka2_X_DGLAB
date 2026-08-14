@@ -9,6 +9,10 @@
 
 游戏本体不包含在项目中。
 
+## 使用示例
+
+![界面截图](docs/example_gui.png)
+
 ## 安装
 
 1. 从 [Releases 下载 MOD](https://github.com/kusadact/SecretFlasherManaka2_X_DGLAB/releases)。
