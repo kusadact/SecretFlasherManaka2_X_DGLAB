@@ -895,6 +895,7 @@ class BridgeWorker(threading.Thread):
         self.current_composite_layers = []
         self.current_composite_climax_active = False
         self.last_channel = None
+        self.last_multiplier = None
 
     def send_event(self, kind, payload=None):
         self.events.put((kind, payload))
@@ -1247,7 +1248,9 @@ class BridgeWorker(threading.Thread):
                 self.state.output_enabled = settings.output_enabled
 
             force_resend = send_units > 0 and (now - self.last_send_time) >= 1.0
+            channel_or_ratio_changed = False
             if app_bound and client and self.last_channel is not None and self.last_channel != settings.channel:
+                channel_or_ratio_changed = True
                 old_channels = set(parse_channels(self.last_channel))
                 new_channels = set(parse_channels(settings.channel))
                 dropped_channels = old_channels - new_channels
@@ -1260,17 +1263,25 @@ class BridgeWorker(threading.Thread):
                         await client.clear_pulses(ch)
                     except Exception:
                         pass
-            self.last_channel = settings.channel
+            if self.last_multiplier is not None and self.last_multiplier != settings.channel_b_multiplier:
+                channel_or_ratio_changed = True
 
-            if send_due and app_bound and (send_units != self.last_sent_units or force_resend):
+            if channel_or_ratio_changed:
+                self.last_sent_units = -1
+                self.last_send_time = 0.0
+
+            self.last_channel = settings.channel
+            self.last_multiplier = settings.channel_b_multiplier
+
+            if (send_due or channel_or_ratio_changed) and app_bound and (send_units != self.last_sent_units or force_resend or channel_or_ratio_changed):
                 try:
-                    await self.send_strength(client, send_units)
+                    await self.send_strength(client, send_units, settings)
                     active_channels = parse_channels(settings.channel)
                     if Channel.A in active_channels and Channel.B in active_channels:
                         b_units = int(round(clamp(send_units * settings.channel_b_multiplier, 0, 200)))
-                        logging.info("Sent strength: channel=Both A=%s B=%s forced=%s", send_units, b_units, force_resend)
+                        logging.info("Sent strength: channel=Both A=%s B=%s forced=%s", send_units, b_units, force_resend or channel_or_ratio_changed)
                     else:
-                        logging.info("Sent strength: units=%s channel=%s forced=%s", send_units, settings.channel, force_resend)
+                        logging.info("Sent strength: units=%s channel=%s forced=%s", send_units, settings.channel, force_resend or channel_or_ratio_changed)
                     self.last_sent_units = send_units
                     self.last_send_time = now
                 except Exception as exc:
@@ -1321,13 +1332,15 @@ class BridgeWorker(threading.Thread):
 
             await asyncio.sleep(0.02)
 
-    async def send_strength(self, client, units: int):
-        if self.settings.dry_run:
+    async def send_strength(self, client, units: int, settings=None):
+        if settings is None:
+            settings = self.settings
+        if settings.dry_run:
             return
-        channels = parse_channels(self.settings.channel)
+        channels = parse_channels(settings.channel)
         if Channel.A in channels and Channel.B in channels:
             a_units = int(round(clamp(units, 0, 200)))
-            b_units = int(round(clamp(units * self.settings.channel_b_multiplier, 0, 200)))
+            b_units = int(round(clamp(units * settings.channel_b_multiplier, 0, 200)))
             await client.set_strength(Channel.A, StrengthOperationType.SET_TO, a_units)
             await client.set_strength(Channel.B, StrengthOperationType.SET_TO, b_units)
         else:
@@ -1682,10 +1695,8 @@ class CoyoteClientApp:
 
         channel_container = ttk.Frame(right, style="Panel.TFrame")
         channel_container.pack(fill="x", pady=(0, 0))
-        self.channel_container = channel_container
 
         channel_frame = ttk.Frame(channel_container, style="Panel.TFrame")
-        self.channel_frame = channel_frame
         channel_frame.pack(fill="x", pady=(0, 0))
         ttk.Label(channel_frame, text="通道", style="Panel.TLabel").pack(side="left")
         self.channel_var = tk.StringVar(value="A")

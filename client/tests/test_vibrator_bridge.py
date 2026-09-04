@@ -455,6 +455,59 @@ def test_channel_b_multiplier_default_and_settings():
     assert s.channel_b_multiplier == 1.0
 
 
+def test_output_loop_channel_switch_and_multiplier_immediate_send():
+    settings = Settings(
+        dry_run=False,
+        output_enabled=True,
+        channel="A",
+        channel_b_multiplier=1.0,
+        max_coyote_strength=50,
+        ramp_units_per_second=10000,
+    )
+    state = RuntimeState()
+    state.app_bound = True
+    state.game_armed = True
+    state.direct_vibrator = True
+    state.vibrator_on = True
+    state.intensity_percent = 100.0
+    state.last_udp_time = time.time()
+    worker = BridgeWorker(settings, state, queue.Queue())
+    worker.current_units = 50.0
+    client = MockDGLabClient()
+
+    async def run_scenario():
+        task = asyncio.create_task(worker.output_loop(client))
+        await asyncio.sleep(0.06)
+        assert (Channel.A, StrengthOperationType.SET_TO, 50) in client.strengths
+        client.strengths.clear()
+
+        # Switch A -> Both without changing strength: immediate send without waiting 1.0s
+        settings.channel = "Both"
+        await asyncio.sleep(0.06)
+        assert (Channel.A, StrengthOperationType.SET_TO, 50) in client.strengths
+        assert (Channel.B, StrengthOperationType.SET_TO, 50) in client.strengths
+        client.strengths.clear()
+
+        # Multiplier change on Both triggers immediate send with clamped output
+        settings.channel_b_multiplier = 2.0
+        await asyncio.sleep(0.06)
+        assert (Channel.A, StrengthOperationType.SET_TO, 50) in client.strengths
+        assert (Channel.B, StrengthOperationType.SET_TO, 100) in client.strengths
+        client.strengths.clear()
+
+        # Switch Both -> A: dropped channel B is cleared immediately
+        settings.channel = "A"
+        await asyncio.sleep(0.06)
+        assert (Channel.B, StrengthOperationType.SET_TO, 0) in client.strengths
+        assert Channel.B in client.cleared
+        assert (Channel.A, StrengthOperationType.SET_TO, 50) in client.strengths
+
+        worker.stop_flag.set()
+        await task
+
+    asyncio.run(run_scenario())
+
+
 if __name__ == "__main__":
     test_high_effective_mode_is_used_directly()
     test_off_mode_zeroes_output()
@@ -468,4 +521,5 @@ if __name__ == "__main__":
     test_layer_epoch_starts_each_layer_at_its_first_frame()
     test_layer_activation_epochs_are_independent_and_queue_cursor_advances()
     test_dungeonlab_pulse_sections_are_converted_to_client_frames()
+    test_output_loop_channel_switch_and_multiplier_immediate_send()
     print("vibrator bridge tests: PASS")
