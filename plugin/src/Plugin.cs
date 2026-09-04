@@ -21,7 +21,7 @@ using HarmonyLib;
 
 namespace SecretFlasherManakaCoyoteLink
 {
-    [BepInPlugin("secretflashermanaka.coyotelink.vibrator", "Secret Flasher Manaka Coyote Link", "0.1.0")]
+    [BepInPlugin("secretflashermanaka.coyotelink.vibrator", "Secret Flasher Manaka Coyote Link", "0.2.0")]
     public sealed class Plugin : BasePlugin
     {
         private Harmony harmony;

@@ -1,7 +1,7 @@
 param(
     [string]$GameDir = "",
     [ValidatePattern("^\d+\.\d+\.\d+$")]
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.2.0",
     [string]$OutputDir = ""
 )
 
