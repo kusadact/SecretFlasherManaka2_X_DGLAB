@@ -49,6 +49,7 @@ max_coyote_strength = 20
 stale_timeout_seconds = 2.0
 send_hz = 5
 channel = A
+channel_b_multiplier = 1.0
 
 [mapping]
 suspicion_deadzone = 0
@@ -397,6 +398,7 @@ def save_config(settings):
         "stale_timeout_seconds": str(settings.stale_timeout_seconds),
         "send_hz": str(settings.send_hz),
         "channel": settings.channel,
+        "channel_b_multiplier": f"{settings.channel_b_multiplier:.1f}",
     }
     cfg["mapping"] = {
         "suspicion_deadzone": str(settings.suspicion_deadzone),
@@ -691,6 +693,7 @@ class Settings:
     stale_timeout_seconds: float = 2.0
     send_hz: float = 5.0
     channel: str = "A"
+    channel_b_multiplier: float = 1.0
     suspicion_deadzone: float = 0.0
     low_suspicion_threshold: float = 0.0
     low_suspicion_min_units: float = 0.0
@@ -891,6 +894,7 @@ class BridgeWorker(threading.Thread):
         self.current_npc_units = []
         self.current_composite_layers = []
         self.current_composite_climax_active = False
+        self.last_channel = None
 
     def send_event(self, kind, payload=None):
         self.events.put((kind, payload))
@@ -1243,10 +1247,30 @@ class BridgeWorker(threading.Thread):
                 self.state.output_enabled = settings.output_enabled
 
             force_resend = send_units > 0 and (now - self.last_send_time) >= 1.0
+            if app_bound and client and self.last_channel is not None and self.last_channel != settings.channel:
+                old_channels = set(parse_channels(self.last_channel))
+                new_channels = set(parse_channels(settings.channel))
+                dropped_channels = old_channels - new_channels
+                for ch in dropped_channels:
+                    try:
+                        await client.set_strength(ch, StrengthOperationType.SET_TO, 0)
+                    except Exception:
+                        pass
+                    try:
+                        await client.clear_pulses(ch)
+                    except Exception:
+                        pass
+            self.last_channel = settings.channel
+
             if send_due and app_bound and (send_units != self.last_sent_units or force_resend):
                 try:
                     await self.send_strength(client, send_units)
-                    logging.info("Sent strength: units=%s channel=%s forced=%s", send_units, settings.channel, force_resend)
+                    active_channels = parse_channels(settings.channel)
+                    if Channel.A in active_channels and Channel.B in active_channels:
+                        b_units = int(round(clamp(send_units * settings.channel_b_multiplier, 0, 200)))
+                        logging.info("Sent strength: channel=Both A=%s B=%s forced=%s", send_units, b_units, force_resend)
+                    else:
+                        logging.info("Sent strength: units=%s channel=%s forced=%s", send_units, settings.channel, force_resend)
                     self.last_sent_units = send_units
                     self.last_send_time = now
                 except Exception as exc:
@@ -1300,8 +1324,16 @@ class BridgeWorker(threading.Thread):
     async def send_strength(self, client, units: int):
         if self.settings.dry_run:
             return
-        for channel in parse_channels(self.settings.channel):
-            await client.set_strength(channel, StrengthOperationType.SET_TO, int(units))
+        channels = parse_channels(self.settings.channel)
+        if Channel.A in channels and Channel.B in channels:
+            a_units = int(round(clamp(units, 0, 200)))
+            b_units = int(round(clamp(units * self.settings.channel_b_multiplier, 0, 200)))
+            await client.set_strength(Channel.A, StrengthOperationType.SET_TO, a_units)
+            await client.set_strength(Channel.B, StrengthOperationType.SET_TO, b_units)
+        else:
+            target_units = int(round(clamp(units, 0, 200)))
+            for channel in channels:
+                await client.set_strength(channel, StrengthOperationType.SET_TO, target_units)
 
     def next_pulse_chunk(self, settings, count=None):
         if count is None:
@@ -1344,8 +1376,11 @@ class BridgeWorker(threading.Thread):
         try:
             old_dry = self.settings.dry_run
             self.settings.dry_run = False
-            for channel in parse_channels(self.settings.channel):
-                await client.set_strength(channel, StrengthOperationType.SET_TO, 0)
+            for channel in (Channel.A, Channel.B):
+                try:
+                    await client.set_strength(channel, StrengthOperationType.SET_TO, 0)
+                except Exception:
+                    pass
                 try:
                     await client.clear_pulses(channel)
                 except Exception:
@@ -1388,6 +1423,7 @@ class CoyoteClientApp:
             stale_timeout_seconds=cfg_float(self.cfg, "safety", "stale_timeout_seconds", 2.0),
             send_hz=cfg_float(self.cfg, "safety", "send_hz", 5.0),
             channel=cfg_str(self.cfg, "safety", "channel", "A"),
+            channel_b_multiplier=clamp(round(cfg_float(self.cfg, "safety", "channel_b_multiplier", 1.0), 1), 0.1, 10.0),
             suspicion_deadzone=cfg_float(self.cfg, "mapping", "suspicion_deadzone", 0.0),
             low_suspicion_threshold=cfg_float(self.cfg, "mapping", "low_suspicion_threshold", 0.0),
             low_suspicion_min_units=cfg_float(self.cfg, "mapping", "low_suspicion_min_units", 0.0),
@@ -1644,7 +1680,11 @@ class CoyoteClientApp:
         )
         self.tip_label.pack(fill="x")
 
-        channel_frame = ttk.Frame(right, style="Panel.TFrame")
+        channel_container = ttk.Frame(right, style="Panel.TFrame")
+        channel_container.pack(fill="x", pady=(0, 0))
+        self.channel_container = channel_container
+
+        channel_frame = ttk.Frame(channel_container, style="Panel.TFrame")
         self.channel_frame = channel_frame
         channel_frame.pack(fill="x", pady=(0, 0))
         ttk.Label(channel_frame, text="通道", style="Panel.TLabel").pack(side="left")
@@ -1658,6 +1698,25 @@ class CoyoteClientApp:
                 command=self.on_control_change,
                 style="Channel.TRadiobutton",
             ).pack(side="left", padx=(10, 0))
+
+        self.channel_b_ratio_var = tk.StringVar(value=f"{self.settings.channel_b_multiplier:.1f}")
+        self.channel_b_ratio_entry = ttk.Entry(
+            channel_frame,
+            textvariable=self.channel_b_ratio_var,
+            width=5,
+            justify="center",
+        )
+        self.channel_b_ratio_entry.bind("<Return>", self.on_channel_b_ratio_entry)
+        self.channel_b_ratio_entry.bind("<FocusOut>", self.on_channel_b_ratio_entry)
+
+        self.channel_tip_frame = ttk.Frame(channel_container, style="Panel.TFrame")
+        self.channel_tip_label = ttk.Label(
+            self.channel_tip_frame,
+            text="右侧为B通道倍率(0.1-10.0)：B = A × 倍率",
+            style="Muted.TLabel",
+            wraplength=self.SETTINGS_CONTENT_WIDTH,
+        )
+        self.channel_tip_label.pack(side="left", fill="x")
 
         waveform_frame = ttk.Frame(right, style="Panel.TFrame")
         waveform_frame.pack(fill="x", pady=(0, 0))
@@ -1875,6 +1934,9 @@ class CoyoteClientApp:
     def apply_settings_to_vars(self):
         self.output_mode_var.set(self.output_mode_from_settings())
         self.channel_var.set(self.settings.channel)
+        if hasattr(self, "channel_b_ratio_var"):
+            self.channel_b_ratio_var.set(f"{self.settings.channel_b_multiplier:.1f}")
+        self.update_channel_ui_state()
         self.climax_wave_enabled_var.set(self.settings.climax_wave_enabled)
         for role in ("vibrator", "piston", "climax"):
             self.waveform_role_vars[role].set(self.waveform_role_name(role))
@@ -2056,6 +2118,7 @@ class CoyoteClientApp:
             "stale_timeout_seconds",
             "send_hz",
             "channel",
+            "channel_b_multiplier",
             "suspicion_deadzone",
             "low_suspicion_threshold",
             "low_suspicion_min_units",
@@ -2081,9 +2144,40 @@ class CoyoteClientApp:
         save_config(self.settings)
         self.message_label.config(text="已重置为默认配置。")
 
+    def update_channel_ui_state(self):
+        if not hasattr(self, "channel_b_ratio_entry"):
+            return
+        if self.channel_var.get() == "Both":
+            if not self.channel_b_ratio_entry.winfo_ismapped():
+                self.channel_b_ratio_entry.pack(side="left", padx=(8, 0))
+            if not self.channel_tip_frame.winfo_ismapped():
+                self.channel_tip_frame.pack(fill="x", pady=(2, 2))
+        else:
+            if self.channel_b_ratio_entry.winfo_ismapped():
+                self.channel_b_ratio_entry.pack_forget()
+            if self.channel_tip_frame.winfo_ismapped():
+                self.channel_tip_frame.pack_forget()
+
+    def on_channel_b_ratio_entry(self, _event=None):
+        if not hasattr(self, "channel_b_ratio_var"):
+            return
+        raw = self.channel_b_ratio_var.get().strip()
+        raw = raw.replace("，", ".").replace(",", ".").replace("。", ".")
+        try:
+            val = float(raw)
+        except ValueError:
+            self.channel_b_ratio_var.set(f"{self.settings.channel_b_multiplier:.1f}")
+            self.message_label.config(text="倍率请输入数字，范围 0.1 ~ 10.0。")
+            return
+        clamped = clamp(round(val, 1), 0.1, 10.0)
+        self.settings.channel_b_multiplier = clamped
+        self.channel_b_ratio_var.set(f"{clamped:.1f}")
+        self.on_control_change(save=True)
+
     def on_control_change(self, save=True):
         self.apply_output_mode()
         self.settings.channel = self.channel_var.get()
+        self.update_channel_ui_state()
         if hasattr(self, "climax_wave_enabled_var"):
             self.settings.climax_wave_enabled = bool(self.climax_wave_enabled_var.get())
         if hasattr(self, "waveform_role_vars"):
@@ -2300,9 +2394,17 @@ class CoyoteClientApp:
             self.output_badge.config(text="输出关闭", bg=self.RED)
         intensity_percent = clamp(intensity_percent, 0.0, 100.0)
         if dry:
-            output_text = f"模拟 {preview_units}/{max_units}"
+            if self.settings.channel == "Both" and abs(self.settings.channel_b_multiplier - 1.0) > 1e-4:
+                b_preview = int(round(clamp(preview_units * self.settings.channel_b_multiplier, 0, 200)))
+                output_text = f"模拟 A:{preview_units} B:{b_preview}/{max_units}"
+            else:
+                output_text = f"模拟 {preview_units}/{max_units}"
         else:
-            output_text = f"郊狼 {actual_units}/{max_units}"
+            if self.settings.channel == "Both" and abs(self.settings.channel_b_multiplier - 1.0) > 1e-4:
+                b_actual = int(round(clamp(actual_units * self.settings.channel_b_multiplier, 0, 200)))
+                output_text = f"郊狼 A:{actual_units} B:{b_actual}/{max_units}"
+            else:
+                output_text = f"郊狼 {actual_units}/{max_units}"
         vibrator_text = vibrator_display_mode(configured_mode, effective_mode, vibrator_on)
         piston_text = piston_display_mode(
             piston_configured_mode,

@@ -26,6 +26,19 @@ from client_gui import (  # noqa: E402  # test imports the local client module
     resolve_vibrator_intensity,
     vibrator_display_mode,
 )
+from pydglab_ws import Channel, StrengthOperationType
+
+
+class MockDGLabClient:
+    def __init__(self):
+        self.strengths = []
+        self.cleared = []
+
+    async def set_strength(self, channel, operation, value):
+        self.strengths.append((channel, operation, value))
+
+    async def clear_pulses(self, channel):
+        self.cleared.append(channel)
 
 
 class DummyWorker:
@@ -382,6 +395,64 @@ def test_pulse_folder_loader_uses_file_stem_and_skips_bad_files():
     assert [record["name"] for record in records] == ["环 开始"]
     assert records[0]["source"] == "pulse-file:环 开始.pulse"
     assert records[0]["pulses"][0][1] == (25, 25, 25, 25)
+
+
+def test_send_strength_both_channels_with_multiplier():
+    settings = Settings(dry_run=False, output_enabled=True, channel="Both", channel_b_multiplier=2.5)
+    worker = BridgeWorker(settings, RuntimeState(), queue.Queue())
+    client = MockDGLabClient()
+    asyncio.run(worker.send_strength(client, 10))
+    assert client.strengths == [
+        (Channel.A, StrengthOperationType.SET_TO, 10),
+        (Channel.B, StrengthOperationType.SET_TO, 25),
+    ]
+
+
+def test_send_strength_clamps_at_200():
+    settings = Settings(dry_run=False, output_enabled=True, channel="Both", channel_b_multiplier=10.0)
+    worker = BridgeWorker(settings, RuntimeState(), queue.Queue())
+    client = MockDGLabClient()
+    asyncio.run(worker.send_strength(client, 30))
+    assert client.strengths == [
+        (Channel.A, StrengthOperationType.SET_TO, 30),
+        (Channel.B, StrengthOperationType.SET_TO, 200),
+    ]
+
+
+def test_send_strength_single_channel_ignores_multiplier():
+    settings_a = Settings(dry_run=False, output_enabled=True, channel="A", channel_b_multiplier=3.0)
+    worker_a = BridgeWorker(settings_a, RuntimeState(), queue.Queue())
+    client_a = MockDGLabClient()
+    asyncio.run(worker_a.send_strength(client_a, 15))
+    assert client_a.strengths == [
+        (Channel.A, StrengthOperationType.SET_TO, 15),
+    ]
+
+    settings_b = Settings(dry_run=False, output_enabled=True, channel="B", channel_b_multiplier=3.0)
+    worker_b = BridgeWorker(settings_b, RuntimeState(), queue.Queue())
+    client_b = MockDGLabClient()
+    asyncio.run(worker_b.send_strength(client_b, 15))
+    assert client_b.strengths == [
+        (Channel.B, StrengthOperationType.SET_TO, 15),
+    ]
+
+
+def test_safe_zero_clears_both_channels_unconditionally():
+    settings = Settings(dry_run=True, output_enabled=True, channel="A")
+    state = RuntimeState()
+    state.app_bound = True
+    worker = BridgeWorker(settings, state, queue.Queue())
+    client = MockDGLabClient()
+    asyncio.run(worker.safe_zero(client))
+    assert (Channel.A, StrengthOperationType.SET_TO, 0) in client.strengths
+    assert (Channel.B, StrengthOperationType.SET_TO, 0) in client.strengths
+    assert Channel.A in client.cleared
+    assert Channel.B in client.cleared
+
+
+def test_channel_b_multiplier_default_and_settings():
+    s = Settings()
+    assert s.channel_b_multiplier == 1.0
 
 
 if __name__ == "__main__":
