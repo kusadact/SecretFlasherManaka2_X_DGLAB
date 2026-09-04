@@ -21,9 +21,9 @@ if getattr(sys, "frozen", False):
     ROOT = Path(sys.executable).resolve().parent
 else:
     ROOT = Path(__file__).resolve().parent
-VENDOR = ROOT / "vendor"
-if str(VENDOR) not in sys.path:
-    sys.path.insert(0, str(VENDOR))
+    VENDOR = ROOT / "vendor"
+    if VENDOR.is_dir() and str(VENDOR) not in sys.path:
+        sys.path.insert(0, str(VENDOR))
 
 import qrcode  # noqa: E402  # vendor path must be configured first
 from PIL import Image, ImageTk  # noqa: E402
